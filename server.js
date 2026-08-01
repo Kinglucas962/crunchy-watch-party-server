@@ -20,7 +20,9 @@ function getRoom(roomId) {
       clients: new Map(),
       lastState: null,
       messages: [],
-      controlMode: "host"
+      controlMode: "host",
+      roomName: "Watch Party",
+      lastAction: null
     });
   }
   return rooms.get(roomId);
@@ -38,7 +40,9 @@ function connectedCount(room) {
 function participantSnapshot(room) {
   return connectedClients(room).map(([clientId, client]) => ({
     clientId,
-    name: client.name
+    name: client.name,
+    avatar: client.avatar || "initial",
+    nameColor: client.nameColor || "#f47521"
   }));
 }
 
@@ -49,7 +53,9 @@ function roomSnapshot(room) {
     participantCount: connectedCount(room),
     participants: participantSnapshot(room),
     messages: room.messages,
-    controlMode: room.controlMode
+    controlMode: room.controlMode,
+    roomName: room.roomName,
+    lastAction: room.lastAction
   };
 }
 
@@ -127,7 +133,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: "Crunchy Watch Party",
-    version: "0.5.0",
+    version: "0.6.0",
     rooms: rooms.size
   });
 });
@@ -155,6 +161,11 @@ wss.on("connection", (socket) => {
       const roomId = String(message.roomId || "").trim().toUpperCase();
       const clientId = String(message.clientId || "").trim();
       const name = String(message.name || "Convidado").trim().slice(0, 24) || "Convidado";
+      const avatar = String(message.avatar || "initial").slice(0, 20);
+      const nameColor = /^#[0-9a-fA-F]{6}$/.test(String(message.nameColor || ""))
+        ? String(message.nameColor)
+        : "#f47521";
+      const requestedRoomName = String(message.roomName || "").trim().slice(0, 40);
 
       if (!roomId || !clientId) {
         safeSend(socket, { type: "ERROR", message: "Sala ou cliente inválido." });
@@ -192,7 +203,13 @@ wss.on("connection", (socket) => {
       }
 
       socket.meta = { roomId, clientId };
-      room.clients.set(clientId, { socket, name, disconnectTimer: null });
+      room.clients.set(clientId, {
+        socket,
+        name,
+        avatar,
+        nameColor,
+        disconnectTimer: null
+      });
 
       const currentHost = room.clients.get(room.hostClientId);
       const hostIsConnected = currentHost?.socket?.readyState === WebSocket.OPEN;
@@ -202,6 +219,7 @@ wss.on("connection", (socket) => {
       }
 
       const clientIsHost = room.hostClientId === clientId;
+      if (clientIsHost && requestedRoomName) room.roomName = requestedRoomName;
       if (message.state && clientIsHost) room.lastState = message.state;
 
       if (isNewParticipant) {
@@ -216,7 +234,9 @@ wss.on("connection", (socket) => {
         participantCount: connectedCount(room),
         participants: participantSnapshot(room),
         messages: room.messages,
-        controlMode: room.controlMode
+        controlMode: room.controlMode,
+        roomName: room.roomName,
+        lastAction: room.lastAction
       });
 
       broadcastSnapshot(room);
@@ -277,6 +297,27 @@ wss.on("connection", (socket) => {
       return;
     }
 
+    if (message.type === "REACTION") {
+      const client = room.clients.get(clientId);
+      const reaction = String(message.reaction || "").slice(0, 8);
+      if (!client || !reaction) return;
+
+      const reactionMessage = {
+        id: randomUUID(),
+        system: false,
+        reaction,
+        clientId,
+        name: client.name,
+        nameColor: client.nameColor,
+        createdAt: Date.now()
+      };
+
+      room.messages.push(reactionMessage);
+      if (room.messages.length > MAX_CHAT_MESSAGES) room.messages.shift();
+      broadcast(room, { type: "CHAT_MESSAGE", message: reactionMessage });
+      return;
+    }
+
     if (message.type === "CHAT_MESSAGE") {
       const client = room.clients.get(clientId);
       const text = String(message.text || "").trim().slice(0, 300);
@@ -287,6 +328,7 @@ wss.on("connection", (socket) => {
         system: false,
         clientId,
         name: client.name,
+        nameColor: client.nameColor,
         text,
         createdAt: Date.now()
       };
@@ -317,6 +359,24 @@ wss.on("connection", (socket) => {
       if (!canControl) return;
 
       room.lastState = message.state;
+
+      const controller = room.clients.get(clientId);
+      const reasonLabels = {
+        play: "reproduziu o vídeo",
+        pause: "pausou o vídeo",
+        seeked: "avançou ou voltou o vídeo",
+        ratechange: "alterou a velocidade"
+      };
+
+      if (reasonLabels[message.reason]) {
+        room.lastAction = {
+          id: randomUUID(),
+          text: `${controller?.name || "Alguém"} ${reasonLabels[message.reason]}.`,
+          createdAt: Date.now()
+        };
+        broadcast(room, { type: "ACTION_NOTICE", action: room.lastAction });
+      }
+
       broadcast(room, {
         type: "PLAYER_STATE",
         state: message.state,
@@ -344,6 +404,6 @@ const keepAlive = setInterval(() => {
 wss.on("close", () => clearInterval(keepAlive));
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor Watch Party v0.5.0 iniciado na porta ${PORT}`);
+  console.log(`Servidor Watch Party v0.6.0 iniciado na porta ${PORT}`);
   console.log("Local: ws://localhost:" + PORT);
 });
