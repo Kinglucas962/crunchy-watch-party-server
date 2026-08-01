@@ -135,7 +135,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: "Crunchy Watch Party",
-    version: "0.8.0",
+    version: "0.9.0",
     rooms: rooms.size
   });
 });
@@ -464,6 +464,6 @@ const keepAlive = setInterval(() => {
 wss.on("close", () => clearInterval(keepAlive));
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor Watch Party v0.8.0 iniciado na porta ${PORT}`);
+  console.log(`Servidor Watch Party v0.9.0 iniciado na porta ${PORT}`);
   console.log("Local: ws://localhost:" + PORT);
 });
