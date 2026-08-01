@@ -19,7 +19,8 @@ function getRoom(roomId) {
       hostClientId: null,
       clients: new Map(),
       lastState: null,
-      messages: []
+      messages: [],
+      controlMode: "host"
     });
   }
   return rooms.get(roomId);
@@ -47,7 +48,8 @@ function roomSnapshot(room) {
     hostClientId: room.hostClientId,
     participantCount: connectedCount(room),
     participants: participantSnapshot(room),
-    messages: room.messages
+    messages: room.messages,
+    controlMode: room.controlMode
   };
 }
 
@@ -125,7 +127,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: "Crunchy Watch Party",
-    version: "0.4.0",
+    version: "0.5.0",
     rooms: rooms.size
   });
 });
@@ -213,7 +215,8 @@ wss.on("connection", (socket) => {
         hostClientId: room.hostClientId,
         participantCount: connectedCount(room),
         participants: participantSnapshot(room),
-        messages: room.messages
+        messages: room.messages,
+        controlMode: room.controlMode
       });
 
       broadcastSnapshot(room);
@@ -256,6 +259,24 @@ wss.on("connection", (socket) => {
       return;
     }
 
+    if (message.type === "SET_CONTROL_MODE") {
+      if (room.hostClientId !== clientId) {
+        safeSend(socket, {
+          type: "ERROR",
+          message: "Somente o anfitrião pode alterar o controle da reprodução."
+        });
+        return;
+      }
+
+      room.controlMode = message.controlMode === "everyone" ? "everyone" : "host";
+      broadcast(room, {
+        type: "CONTROL_MODE_CHANGED",
+        controlMode: room.controlMode
+      });
+      broadcastSnapshot(room);
+      return;
+    }
+
     if (message.type === "CHAT_MESSAGE") {
       const client = room.clients.get(clientId);
       const text = String(message.text || "").trim().slice(0, 300);
@@ -277,9 +298,8 @@ wss.on("connection", (socket) => {
       return;
     }
 
-    if (room.hostClientId !== clientId) return;
-
     if (message.type === "NAVIGATE") {
+      if (room.hostClientId !== clientId) return;
       const pageUrl = String(message.pageUrl || "");
       if (!pageUrl.includes("crunchyroll.com")) return;
       room.lastState = { ...(room.lastState || {}), pageUrl };
@@ -293,11 +313,15 @@ wss.on("connection", (socket) => {
     }
 
     if (message.type === "PLAYER_STATE") {
+      const canControl = room.hostClientId === clientId || room.controlMode === "everyone";
+      if (!canControl) return;
+
       room.lastState = message.state;
       broadcast(room, {
         type: "PLAYER_STATE",
         state: message.state,
         reason: message.reason,
+        controlledByClientId: clientId,
         serverSentAt: Date.now()
       }, clientId);
     }
@@ -320,6 +344,6 @@ const keepAlive = setInterval(() => {
 wss.on("close", () => clearInterval(keepAlive));
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor Watch Party v0.4.0 iniciado na porta ${PORT}`);
+  console.log(`Servidor Watch Party v0.5.0 iniciado na porta ${PORT}`);
   console.log("Local: ws://localhost:" + PORT);
 });
