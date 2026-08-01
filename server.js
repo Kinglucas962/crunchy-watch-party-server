@@ -1,9 +1,11 @@
 import http from "node:http";
 import express from "express";
+import { randomUUID } from "node:crypto";
 import { WebSocket, WebSocketServer } from "ws";
 
 const PORT = Number(process.env.PORT || 8080);
 const RECONNECT_GRACE_MS = 15000;
+const MAX_CHAT_MESSAGES = 100;
 const rooms = new Map();
 
 function safeSend(socket, payload) {
@@ -13,13 +15,40 @@ function safeSend(socket, payload) {
 
 function getRoom(roomId) {
   if (!rooms.has(roomId)) {
-    rooms.set(roomId, { hostClientId: null, clients: new Map(), lastState: null });
+    rooms.set(roomId, {
+      hostClientId: null,
+      clients: new Map(),
+      lastState: null,
+      messages: []
+    });
   }
   return rooms.get(roomId);
 }
 
+function connectedClients(room) {
+  return [...room.clients.entries()]
+    .filter(([, client]) => client.socket?.readyState === WebSocket.OPEN);
+}
+
 function connectedCount(room) {
-  return [...room.clients.values()].filter((client) => client.socket?.readyState === WebSocket.OPEN).length;
+  return connectedClients(room).length;
+}
+
+function participantSnapshot(room) {
+  return connectedClients(room).map(([clientId, client]) => ({
+    clientId,
+    name: client.name
+  }));
+}
+
+function roomSnapshot(room) {
+  return {
+    type: "ROOM_SNAPSHOT",
+    hostClientId: room.hostClientId,
+    participantCount: connectedCount(room),
+    participants: participantSnapshot(room),
+    messages: room.messages
+  };
 }
 
 function broadcast(room, payload, exceptClientId = null) {
@@ -29,6 +58,10 @@ function broadcast(room, payload, exceptClientId = null) {
   }
 }
 
+function broadcastSnapshot(room) {
+  broadcast(room, roomSnapshot(room));
+}
+
 function chooseNewHost(room) {
   for (const [clientId, client] of room.clients) {
     if (client.socket?.readyState === WebSocket.OPEN) return clientId;
@@ -36,11 +69,24 @@ function chooseNewHost(room) {
   return null;
 }
 
+function pushSystemMessage(room, text) {
+  const message = {
+    id: randomUUID(),
+    system: true,
+    text,
+    createdAt: Date.now()
+  };
+  room.messages.push(message);
+  if (room.messages.length > MAX_CHAT_MESSAGES) room.messages.shift();
+  return message;
+}
+
 function finalizeDisconnect(roomId, clientId) {
   const room = rooms.get(roomId);
   const client = room?.clients.get(clientId);
   if (!room || !client || client.socket) return;
 
+  const oldName = client.name;
   room.clients.delete(clientId);
 
   if (room.clients.size === 0) {
@@ -56,11 +102,8 @@ function finalizeDisconnect(roomId, clientId) {
     }
   }
 
-  broadcast(room, {
-    type: "PARTICIPANT_LEFT",
-    clientId,
-    participantCount: connectedCount(room)
-  });
+  pushSystemMessage(room, `${oldName} saiu da sala.`);
+  broadcastSnapshot(room);
 }
 
 function markDisconnected(socket) {
@@ -82,7 +125,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: "Crunchy Watch Party",
-    version: "0.3.0",
+    version: "0.4.0",
     rooms: rooms.size
   });
 });
@@ -99,8 +142,9 @@ wss.on("connection", (socket) => {
 
   socket.on("message", (rawData) => {
     let message;
-    try { message = JSON.parse(rawData.toString()); }
-    catch {
+    try {
+      message = JSON.parse(rawData.toString());
+    } catch {
       safeSend(socket, { type: "ERROR", message: "Mensagem inválida." });
       return;
     }
@@ -108,15 +152,23 @@ wss.on("connection", (socket) => {
     if (message.type === "JOIN_ROOM") {
       const roomId = String(message.roomId || "").trim().toUpperCase();
       const clientId = String(message.clientId || "").trim();
-      const name = String(message.name || "Convidado").slice(0, 24);
+      const name = String(message.name || "Convidado").trim().slice(0, 24) || "Convidado";
 
       if (!roomId || !clientId) {
         safeSend(socket, { type: "ERROR", message: "Sala ou cliente inválido." });
         return;
       }
 
-      const roomAlreadyExists = rooms.has(roomId);
-      const existingClient = roomAlreadyExists ? rooms.get(roomId).clients.get(clientId) : null;
+      let roomAlreadyExists = rooms.has(roomId);
+      let existingRoom = roomAlreadyExists ? rooms.get(roomId) : null;
+      let existingClient = existingRoom?.clients.get(clientId) || null;
+
+      if (roomAlreadyExists && connectedCount(existingRoom) === 0) {
+        rooms.delete(roomId);
+        roomAlreadyExists = false;
+        existingRoom = null;
+        existingClient = null;
+      }
 
       if (!message.createRoom && !roomAlreadyExists) {
         safeSend(socket, { type: "ERROR", message: "Essa sala não existe." });
@@ -130,6 +182,8 @@ wss.on("connection", (socket) => {
 
       const room = getRoom(roomId);
       const previous = room.clients.get(clientId);
+      const isNewParticipant = !previous;
+
       if (previous) {
         clearTimeout(previous.disconnectTimer);
         if (previous.socket && previous.socket !== socket) previous.socket.close();
@@ -137,25 +191,32 @@ wss.on("connection", (socket) => {
 
       socket.meta = { roomId, clientId };
       room.clients.set(clientId, { socket, name, disconnectTimer: null });
-      if (!room.hostClientId) room.hostClientId = clientId;
+
+      const currentHost = room.clients.get(room.hostClientId);
+      const hostIsConnected = currentHost?.socket?.readyState === WebSocket.OPEN;
+
+      if (!room.hostClientId || !hostIsConnected || message.createRoom) {
+        room.hostClientId = clientId;
+      }
 
       const clientIsHost = room.hostClientId === clientId;
       if (message.state && clientIsHost) room.lastState = message.state;
+
+      if (isNewParticipant) {
+        pushSystemMessage(room, `${name} entrou na sala.`);
+      }
 
       safeSend(socket, {
         type: "ROOM_JOINED",
         roomId,
         isHost: clientIsHost,
         hostClientId: room.hostClientId,
-        participantCount: connectedCount(room)
+        participantCount: connectedCount(room),
+        participants: participantSnapshot(room),
+        messages: room.messages
       });
 
-      broadcast(room, {
-        type: "PARTICIPANT_JOINED",
-        clientId,
-        name,
-        participantCount: connectedCount(room)
-      }, clientId);
+      broadcastSnapshot(room);
 
       if (clientIsHost && message.state) {
         broadcast(room, {
@@ -184,6 +245,7 @@ wss.on("connection", (socket) => {
 
     const { roomId, clientId } = socket.meta;
     const room = rooms.get(roomId);
+
     if (!room || !clientId) {
       safeSend(socket, { type: "ERROR", message: "Entre em uma sala primeiro." });
       return;
@@ -191,6 +253,27 @@ wss.on("connection", (socket) => {
 
     if (message.type === "PING") {
       safeSend(socket, { type: "PONG", serverSentAt: Date.now() });
+      return;
+    }
+
+    if (message.type === "CHAT_MESSAGE") {
+      const client = room.clients.get(clientId);
+      const text = String(message.text || "").trim().slice(0, 300);
+      if (!client || !text) return;
+
+      const chatMessage = {
+        id: randomUUID(),
+        system: false,
+        clientId,
+        name: client.name,
+        text,
+        createdAt: Date.now()
+      };
+
+      room.messages.push(chatMessage);
+      if (room.messages.length > MAX_CHAT_MESSAGES) room.messages.shift();
+
+      broadcast(room, { type: "CHAT_MESSAGE", message: chatMessage });
       return;
     }
 
@@ -237,6 +320,6 @@ const keepAlive = setInterval(() => {
 wss.on("close", () => clearInterval(keepAlive));
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor Watch Party v0.3 iniciado na porta ${PORT}`);
+  console.log(`Servidor Watch Party v0.4.0 iniciado na porta ${PORT}`);
   console.log("Local: ws://localhost:" + PORT);
 });
