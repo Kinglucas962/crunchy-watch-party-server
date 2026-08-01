@@ -1,0 +1,242 @@
+import http from "node:http";
+import express from "express";
+import { WebSocket, WebSocketServer } from "ws";
+
+const PORT = Number(process.env.PORT || 8080);
+const RECONNECT_GRACE_MS = 15000;
+const rooms = new Map();
+
+function safeSend(socket, payload) {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  socket.send(JSON.stringify(payload));
+}
+
+function getRoom(roomId) {
+  if (!rooms.has(roomId)) {
+    rooms.set(roomId, { hostClientId: null, clients: new Map(), lastState: null });
+  }
+  return rooms.get(roomId);
+}
+
+function connectedCount(room) {
+  return [...room.clients.values()].filter((client) => client.socket?.readyState === WebSocket.OPEN).length;
+}
+
+function broadcast(room, payload, exceptClientId = null) {
+  for (const [clientId, client] of room.clients) {
+    if (clientId === exceptClientId) continue;
+    safeSend(client.socket, payload);
+  }
+}
+
+function chooseNewHost(room) {
+  for (const [clientId, client] of room.clients) {
+    if (client.socket?.readyState === WebSocket.OPEN) return clientId;
+  }
+  return null;
+}
+
+function finalizeDisconnect(roomId, clientId) {
+  const room = rooms.get(roomId);
+  const client = room?.clients.get(clientId);
+  if (!room || !client || client.socket) return;
+
+  room.clients.delete(clientId);
+
+  if (room.clients.size === 0) {
+    rooms.delete(roomId);
+    console.log(`Sala ${roomId} removida.`);
+    return;
+  }
+
+  if (room.hostClientId === clientId) {
+    room.hostClientId = chooseNewHost(room);
+    if (room.hostClientId) {
+      broadcast(room, { type: "HOST_CHANGED", hostClientId: room.hostClientId });
+    }
+  }
+
+  broadcast(room, {
+    type: "PARTICIPANT_LEFT",
+    clientId,
+    participantCount: connectedCount(room)
+  });
+}
+
+function markDisconnected(socket) {
+  const { roomId, clientId } = socket.meta || {};
+  const room = rooms.get(roomId);
+  const client = room?.clients.get(clientId);
+  if (!room || !client || client.socket !== socket) return;
+
+  client.socket = null;
+  clearTimeout(client.disconnectTimer);
+  client.disconnectTimer = setTimeout(
+    () => finalizeDisconnect(roomId, clientId),
+    RECONNECT_GRACE_MS
+  );
+}
+
+const app = express();
+app.get("/", (_req, res) => {
+  res.status(200).json({
+    ok: true,
+    service: "Crunchy Watch Party",
+    version: "0.3.0",
+    rooms: rooms.size
+  });
+});
+app.get("/health", (_req, res) => res.status(200).send("ok"));
+
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+wss.on("connection", (socket) => {
+  socket.meta = {};
+  socket.isAlive = true;
+  socket.on("pong", () => { socket.isAlive = true; });
+  socket.on("error", console.error);
+
+  socket.on("message", (rawData) => {
+    let message;
+    try { message = JSON.parse(rawData.toString()); }
+    catch {
+      safeSend(socket, { type: "ERROR", message: "Mensagem inválida." });
+      return;
+    }
+
+    if (message.type === "JOIN_ROOM") {
+      const roomId = String(message.roomId || "").trim().toUpperCase();
+      const clientId = String(message.clientId || "").trim();
+      const name = String(message.name || "Convidado").slice(0, 24);
+
+      if (!roomId || !clientId) {
+        safeSend(socket, { type: "ERROR", message: "Sala ou cliente inválido." });
+        return;
+      }
+
+      const roomAlreadyExists = rooms.has(roomId);
+      const existingClient = roomAlreadyExists ? rooms.get(roomId).clients.get(clientId) : null;
+
+      if (!message.createRoom && !roomAlreadyExists) {
+        safeSend(socket, { type: "ERROR", message: "Essa sala não existe." });
+        return;
+      }
+
+      if (message.createRoom && roomAlreadyExists && !existingClient) {
+        safeSend(socket, { type: "ERROR", message: "Esse código de sala já está em uso." });
+        return;
+      }
+
+      const room = getRoom(roomId);
+      const previous = room.clients.get(clientId);
+      if (previous) {
+        clearTimeout(previous.disconnectTimer);
+        if (previous.socket && previous.socket !== socket) previous.socket.close();
+      }
+
+      socket.meta = { roomId, clientId };
+      room.clients.set(clientId, { socket, name, disconnectTimer: null });
+      if (!room.hostClientId) room.hostClientId = clientId;
+
+      const clientIsHost = room.hostClientId === clientId;
+      if (message.state && clientIsHost) room.lastState = message.state;
+
+      safeSend(socket, {
+        type: "ROOM_JOINED",
+        roomId,
+        isHost: clientIsHost,
+        hostClientId: room.hostClientId,
+        participantCount: connectedCount(room)
+      });
+
+      broadcast(room, {
+        type: "PARTICIPANT_JOINED",
+        clientId,
+        name,
+        participantCount: connectedCount(room)
+      }, clientId);
+
+      if (clientIsHost && message.state) {
+        broadcast(room, {
+          type: "NAVIGATE",
+          pageUrl: message.state.pageUrl,
+          reason: "host-reconnected"
+        }, clientId);
+        broadcast(room, {
+          type: "PLAYER_STATE",
+          state: room.lastState,
+          serverSentAt: Date.now()
+        }, clientId);
+      } else if (room.lastState) {
+        safeSend(socket, {
+          type: "PLAYER_STATE",
+          state: room.lastState,
+          serverSentAt: Date.now()
+        });
+      } else if (!clientIsHost) {
+        safeSend(room.clients.get(room.hostClientId)?.socket, { type: "REQUEST_STATE" });
+      }
+
+      console.log(`${name} entrou/reconectou na sala ${roomId}. Conectados: ${connectedCount(room)}`);
+      return;
+    }
+
+    const { roomId, clientId } = socket.meta;
+    const room = rooms.get(roomId);
+    if (!room || !clientId) {
+      safeSend(socket, { type: "ERROR", message: "Entre em uma sala primeiro." });
+      return;
+    }
+
+    if (message.type === "PING") {
+      safeSend(socket, { type: "PONG", serverSentAt: Date.now() });
+      return;
+    }
+
+    if (room.hostClientId !== clientId) return;
+
+    if (message.type === "NAVIGATE") {
+      const pageUrl = String(message.pageUrl || "");
+      if (!pageUrl.includes("crunchyroll.com")) return;
+      room.lastState = { ...(room.lastState || {}), pageUrl };
+      broadcast(room, {
+        type: "NAVIGATE",
+        pageUrl,
+        reason: message.reason,
+        serverSentAt: Date.now()
+      }, clientId);
+      return;
+    }
+
+    if (message.type === "PLAYER_STATE") {
+      room.lastState = message.state;
+      broadcast(room, {
+        type: "PLAYER_STATE",
+        state: message.state,
+        reason: message.reason,
+        serverSentAt: Date.now()
+      }, clientId);
+    }
+  });
+
+  socket.on("close", () => markDisconnected(socket));
+});
+
+const keepAlive = setInterval(() => {
+  for (const socket of wss.clients) {
+    if (socket.isAlive === false) {
+      socket.terminate();
+      continue;
+    }
+    socket.isAlive = false;
+    socket.ping();
+  }
+}, 30000);
+
+wss.on("close", () => clearInterval(keepAlive));
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.log(`Servidor Watch Party v0.3 iniciado na porta ${PORT}`);
+  console.log("Local: ws://localhost:" + PORT);
+});
