@@ -134,7 +134,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: "Crunchy Watch Party",
-    version: "0.7.0",
+    version: "0.7.1",
     rooms: rooms.size
   });
 });
@@ -344,6 +344,8 @@ wss.on("connection", (socket) => {
         reaction,
         clientId,
         name: client.name,
+        avatar: client.avatar || "initial",
+        customPhoto: client.avatar === "custom" ? client.customPhoto || "" : "",
         nameColor: client.nameColor,
         createdAt: Date.now()
       };
@@ -373,6 +375,8 @@ wss.on("connection", (socket) => {
         system: false,
         clientId,
         name: client.name,
+        avatar: client.avatar || "initial",
+        customPhoto: client.avatar === "custom" ? client.customPhoto || "" : "",
         nameColor: client.nameColor,
         text,
         createdAt: Date.now()
@@ -449,6 +453,6 @@ const keepAlive = setInterval(() => {
 wss.on("close", () => clearInterval(keepAlive));
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor Watch Party v0.7.0 iniciado na porta ${PORT}`);
+  console.log(`Servidor Watch Party v0.7.1 iniciado na porta ${PORT}`);
   console.log("Local: ws://localhost:" + PORT);
 });
