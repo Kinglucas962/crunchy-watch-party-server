@@ -42,6 +42,7 @@ function participantSnapshot(room) {
     clientId,
     name: client.name,
     avatar: client.avatar || "initial",
+    customPhoto: client.avatar === "custom" ? client.customPhoto || "" : "",
     nameColor: client.nameColor || "#f47521"
   }));
 }
@@ -133,7 +134,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: "Crunchy Watch Party",
-    version: "0.6.1",
+    version: "0.7.0",
     rooms: rooms.size
   });
 });
@@ -162,6 +163,12 @@ wss.on("connection", (socket) => {
       const clientId = String(message.clientId || "").trim();
       const name = String(message.name || "Convidado").trim().slice(0, 24) || "Convidado";
       const avatar = String(message.avatar || "initial").slice(0, 20);
+      const rawCustomPhoto = String(message.customPhoto || "");
+      const customPhoto = avatar === "custom"
+        && rawCustomPhoto.startsWith("data:image/")
+        && rawCustomPhoto.length <= 90000
+          ? rawCustomPhoto
+          : "";
       const nameColor = /^#[0-9a-fA-F]{6}$/.test(String(message.nameColor || ""))
         ? String(message.nameColor)
         : "#f47521";
@@ -207,6 +214,7 @@ wss.on("connection", (socket) => {
         socket,
         name,
         avatar,
+        customPhoto,
         nameColor,
         disconnectTimer: null
       });
@@ -287,12 +295,19 @@ wss.on("connection", (socket) => {
         .trim()
         .slice(0, 24) || "Convidado";
       const nextAvatar = String(message.avatar || client.avatar || "initial").slice(0, 20);
+      const rawNextPhoto = String(message.customPhoto || "");
+      const nextPhoto = nextAvatar === "custom"
+        && rawNextPhoto.startsWith("data:image/")
+        && rawNextPhoto.length <= 90000
+          ? rawNextPhoto
+          : "";
       const nextColor = /^#[0-9a-fA-F]{6}$/.test(String(message.nameColor || ""))
         ? String(message.nameColor)
         : client.nameColor || "#f47521";
 
       client.name = nextName;
       client.avatar = nextAvatar;
+      client.customPhoto = nextPhoto;
       client.nameColor = nextColor;
 
       broadcastSnapshot(room);
@@ -434,6 +449,6 @@ const keepAlive = setInterval(() => {
 wss.on("close", () => clearInterval(keepAlive));
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor Watch Party v0.6.1 iniciado na porta ${PORT}`);
+  console.log(`Servidor Watch Party v0.7.0 iniciado na porta ${PORT}`);
   console.log("Local: ws://localhost:" + PORT);
 });
