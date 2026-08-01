@@ -133,7 +133,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: "Crunchy Watch Party",
-    version: "0.6.0",
+    version: "0.6.1",
     rooms: rooms.size
   });
 });
@@ -279,6 +279,26 @@ wss.on("connection", (socket) => {
       return;
     }
 
+    if (message.type === "UPDATE_PROFILE") {
+      const client = room.clients.get(clientId);
+      if (!client) return;
+
+      const nextName = String(message.name || client.name || "Convidado")
+        .trim()
+        .slice(0, 24) || "Convidado";
+      const nextAvatar = String(message.avatar || client.avatar || "initial").slice(0, 20);
+      const nextColor = /^#[0-9a-fA-F]{6}$/.test(String(message.nameColor || ""))
+        ? String(message.nameColor)
+        : client.nameColor || "#f47521";
+
+      client.name = nextName;
+      client.avatar = nextAvatar;
+      client.nameColor = nextColor;
+
+      broadcastSnapshot(room);
+      return;
+    }
+
     if (message.type === "SET_CONTROL_MODE") {
       if (room.hostClientId !== clientId) {
         safeSend(socket, {
@@ -299,8 +319,9 @@ wss.on("connection", (socket) => {
 
     if (message.type === "REACTION") {
       const client = room.clients.get(clientId);
+      const allowedReactions = new Set(["😂", "😭", "❤️", "🔥", "😱", "👏"]);
       const reaction = String(message.reaction || "").slice(0, 8);
-      if (!client || !reaction) return;
+      if (!client || !allowedReactions.has(reaction)) return;
 
       const reactionMessage = {
         id: randomUUID(),
@@ -314,7 +335,16 @@ wss.on("connection", (socket) => {
 
       room.messages.push(reactionMessage);
       if (room.messages.length > MAX_CHAT_MESSAGES) room.messages.shift();
-      broadcast(room, { type: "CHAT_MESSAGE", message: reactionMessage });
+
+      broadcast(room, {
+        type: "REACTION_EVENT",
+        reactionEvent: reactionMessage
+      });
+
+      broadcast(room, {
+        type: "CHAT_MESSAGE",
+        message: reactionMessage
+      });
       return;
     }
 
@@ -404,6 +434,6 @@ const keepAlive = setInterval(() => {
 wss.on("close", () => clearInterval(keepAlive));
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor Watch Party v0.6.0 iniciado na porta ${PORT}`);
+  console.log(`Servidor Watch Party v0.6.1 iniciado na porta ${PORT}`);
   console.log("Local: ws://localhost:" + PORT);
 });
