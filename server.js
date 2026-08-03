@@ -135,7 +135,7 @@ app.get("/", (_req, res) => {
   res.status(200).json({
     ok: true,
     service: "Crunchy Watch Party",
-    version: "0.9.0",
+    version: "0.9.1",
     rooms: rooms.size
   });
 });
@@ -288,6 +288,18 @@ wss.on("connection", (socket) => {
 
     if (message.type === "PING") {
       safeSend(socket, { type: "PONG", serverSentAt: Date.now() });
+      return;
+    }
+
+    if (message.type === "LEAVE_ROOM") {
+      const leavingClient = room.clients.get(clientId);
+      if (!leavingClient || leavingClient.socket !== socket) return;
+      safeSend(socket, { type: "LEFT_ROOM", roomId });
+      clearTimeout(leavingClient.disconnectTimer);
+      leavingClient.socket = null;
+      socket.meta = {};
+      finalizeDisconnect(roomId, clientId);
+      socket.close(1000, "Saída voluntária");
       return;
     }
 
@@ -464,6 +476,6 @@ const keepAlive = setInterval(() => {
 wss.on("close", () => clearInterval(keepAlive));
 
 server.listen(PORT, "0.0.0.0", () => {
-  console.log(`Servidor Watch Party v0.9.0 iniciado na porta ${PORT}`);
+  console.log(`Servidor Watch Party v0.9.1 iniciado na porta ${PORT}`);
   console.log("Local: ws://localhost:" + PORT);
 });
