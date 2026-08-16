@@ -5,7 +5,9 @@
   "description": "Servidor online WebSocket para Crunchy Watch Party",
   "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "check": "node --check server.js",
+    "test": "node --test"
   },
   "dependencies": {
     "ws": "^8.18.3",
